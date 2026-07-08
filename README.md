@@ -5,7 +5,7 @@ An AI-assisted compost monitoring and control system running on a Raspberry Pi. 
 > Developed during a Student Internship Programme (SIP) at the **Fukuoka Institute of Technology**, Matsuo Laboratory (Information & Communication Engineering).
 
 <!-- Replace with a real screenshot committed to the repo, e.g. docs/dashboard.png -->
-![Dashboard](docs/dashboard.png)
+![Dashboard](dashboard.png)
 
 ---
 
