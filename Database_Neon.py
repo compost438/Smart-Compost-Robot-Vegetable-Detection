@@ -139,7 +139,7 @@ class DatabaseTool:
                     print(f"[DB] model_prediction inserted (+C/N) bin={bin_id}")
             except psycopg2.errors.UndefinedColumn:
                 # cn_ratio/browns_grams 列がまだ無い -> 旧4列で再試行
-                conn.rollback()
+                # (直前の `with conn:` が例外時に自動でrollback済み)
                 with conn:
                     with conn.cursor() as cur:
                         cur.execute(legacy_query, legacy_params)

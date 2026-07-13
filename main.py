@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
 
-import os, sys, time, datetime, json, math
+import os, sys, time, datetime, json, math, threading
 from collections import deque
 import cv2
 import customtkinter as ctk
@@ -13,6 +13,7 @@ from Database_Neon import DatabaseTool
 from open_cv import OpenCVCamera
 from LocalLogger import log_sensor_data
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 IMAGE_SIZE = 360  # smaller so the whole page fits a 1080p screen
 
 # ---- Theme palette (dark + compost green) ----
@@ -47,6 +48,10 @@ class GPIOController:
         if not self.pi.connected:
             raise RuntimeError("pigpiod not running. Run 'sudo pigpiod' first.")
 
+        # main.py の1秒センサーループとカメラの撮影スレッド(LED制御)が
+        # 同時にpigpioへ書き込みうるため、排他制御が必要
+        self._lock = threading.RLock()
+
         # GPIOピン割り当て
         self.pins = {"LED": 25, "Fan": 24, "Spray": 23, "Mixer": 22}
 
@@ -64,15 +69,17 @@ class GPIOController:
 
     def set(self, name, on: bool):
         """AUTO制御用の set（manual フラグは変更しない）"""
-        if name in self.pins:
-            self.pi.write(self.pins[name], 0 if on else 1)
-            self.state[name] = on
+        with self._lock:
+            if name in self.pins:
+                self.pi.write(self.pins[name], 0 if on else 1)
+                self.state[name] = on
 
     def toggle(self, name):
         """互換性のため残す（現在GUIボタンでは未使用）"""
-        if name in self.pins:
-            self.set(name, not self.state[name])
-            dprint(f"{name}: {'ON' if self.state[name] else 'OFF'}")
+        with self._lock:
+            if name in self.pins:
+                self.set(name, not self.state[name])
+                dprint(f"{name}: {'ON' if self.state[name] else 'OFF'}")
 
     # ----------------------------
     # Manual override API
@@ -81,29 +88,34 @@ class GPIOController:
         """
         ユーザーが強制的にON/OFFする（AUTOロジックは上書きしない）
         """
-        if name in self.pins:
-            self.manual[name] = True
-            self.set(name, on)
-            print(f"{name}: {'ON' if on else 'OFF'} (MANUAL)")
+        with self._lock:
+            if name in self.pins:
+                self.manual[name] = True
+                self.set(name, on)
+                print(f"{name}: {'ON' if on else 'OFF'} (MANUAL)")
 
     def clear_manual(self, name):
         """手動制御を解除し、AUTO制御に戻す"""
-        if name in self.pins:
-            self.manual[name] = False
-            print(f"{name}: MANUAL CLEARED → AUTO")
+        with self._lock:
+            if name in self.pins:
+                self.manual[name] = False
+                print(f"{name}: MANUAL CLEARED → AUTO")
 
     def is_manual(self, name):
-        return self.manual.get(name, False)
+        with self._lock:
+            return self.manual.get(name, False)
 
     def get(self, name):
-        return self.state.get(name, False)
+        with self._lock:
+            return self.state.get(name, False)
 
     def cleanup(self):
         """終了時に全リレーを安全OFFへ戻す"""
-        for p in self.pins.values():
-            self.pi.write(p, 1)
-        self.pi.stop()
-        print("GPIO cleaned up (all pins set HIGH)")
+        with self._lock:
+            for p in self.pins.values():
+                self.pi.write(p, 1)
+            self.pi.stop()
+            print("GPIO cleaned up (all pins set HIGH)")
 
 
 # ============================================================
@@ -125,7 +137,7 @@ def F_MakeScreen_Demo():
     # ============================================================
     # MQ135 CONFIG（Rs/R0 の計算）
     # ============================================================
-    MQ135_R0_PATH = "/home/d5110/Desktop/Gordon/mq135_r0.json"
+    MQ135_R0_PATH = os.environ.get("MQ135_R0_PATH", os.path.join(BASE_DIR, "mq135_r0.json"))
     VCC = 5.0
     RL = 10000.0  # 10kΩ
 
@@ -324,11 +336,15 @@ def F_MakeScreen_Demo():
     for i, n in enumerate(["LED", "Fan", "Spray", "Mixer"]):
         b = ctk.CTkButton(
             btn_row, text=f"{n} OFF", height=42, fg_color=BTN_OFF, hover_color="#2b332e",
-            text_color=TEXT, corner_radius=10,
+            text_color=TEXT, corner_radius=10, border_width=0, border_color=YELLOW,
             command=lambda x=n: (gpio.set_manual(x, not gpio.get(x)), update_gpio_button(x)),
         )
         b.grid(row=i // 2, column=i % 2, padx=6, pady=6, sticky="ew")
+        b.bind("<Button-3>", lambda e, x=n: (gpio.clear_manual(x), update_gpio_button(x)))
         gpio_buttons[n] = b
+
+    ctk.CTkLabel(gpio_frame, text="Click to toggle manually · right-click to return to AUTO",
+                 text_color=TEXT_MUTED, font=("Arial", 10)).pack(anchor="w", padx=16, pady=(0, 8))
 
     db_pill = ctk.CTkFrame(gpio_hdr, fg_color=TILE_BG, corner_radius=13,
                            border_width=1, border_color=CARD_BORDER)
@@ -428,7 +444,6 @@ def F_MakeScreen_Demo():
     ctk.CTkLabel(lv_head, text="LIVE COMPOST VIEW", text_color=TEXT_MUTED,
                  font=("Arial", 12, "bold")).pack(side="left", padx=(10, 0))
     rec = ctk.CTkFrame(lv_head, fg_color="transparent")
-    rec.pack(side="right")
     ctk.CTkFrame(rec, width=8, height=8, corner_radius=4, fg_color=RED).pack(side="left", pady=4)
     ctk.CTkLabel(rec, text="REC", text_color=RED, font=("Arial", 11, "bold")).pack(side="left", padx=(5, 0))
 
@@ -441,9 +456,19 @@ def F_MakeScreen_Demo():
 
     lvbar = ctk.CTkFrame(live_card, fg_color="transparent")
     lvbar.pack(fill="x", padx=16, pady=(0, 14))
-    control.live_var = ctk.BooleanVar(value=True)
+    control.live_var = ctk.BooleanVar(value=False)
+
+    def update_rec_indicator():
+        if control.live_var.get():
+            rec.pack(side="right")
+        else:
+            rec.pack_forget()
+
+    update_rec_indicator()
+
     ctk.CTkCheckBox(lvbar, text="Live View (aim the camera)",
-                    variable=control.live_var).pack(anchor="w", pady=(0, 8))
+                    variable=control.live_var,
+                    command=update_rec_indicator).pack(anchor="w", pady=(0, 8))
     control.btn_capture = ctk.CTkButton(
         lvbar, text="Capture Now", height=48, corner_radius=12,
         fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color="#0b3d1a",
@@ -507,13 +532,16 @@ def F_MakeScreen_Demo():
     # HELPERS
     # ============================================================
     def update_gpio_button(name):
-        """GPIOボタン表示更新（ON/OFFの色と文字）"""
+        """GPIOボタン表示更新（ON/OFFの色と文字、MANUAL中は黄枠+ラベル）"""
         if name in gpio_buttons:
             state = gpio.get(name)
+            manual = gpio.is_manual(name)
             btn = gpio_buttons[name]
-            btn.configure(text=f"{name} {'ON' if state else 'OFF'}",
+            label = f"{name} {'ON' if state else 'OFF'}" + ("  (M)" if manual else "")
+            btn.configure(text=label,
                           fg_color=ACCENT if state else BTN_OFF,
-                          hover_color=ACCENT_HOVER if state else "#2b332e")
+                          hover_color=ACCENT_HOVER if state else "#2b332e",
+                          border_width=2 if manual else 0)
 
     def update_air_indicator(ratio_value: float):
         """MQ135（Rs/R0）に応じて色とステータス表示を更新"""
@@ -606,7 +634,7 @@ def F_MakeScreen_Demo():
 
         set_stat("text_Pres", "Nominal", ACCENT, TEXT_MUTED)
 
-        if lux < 50:
+        if lux < LIGHT_MIN_LUX:
             set_stat("text_Lux", "Dark", GREY, TEXT_MUTED)
         else:
             set_stat("text_Lux", "Lit", ACCENT, TEXT_MUTED)
@@ -999,14 +1027,12 @@ def F_MakeScreen_Demo():
             # PRIORITY 1 — Soil temperature safety
             if soil_too_hot:
                 mixer = True
-                fan = True
                 spray = False
                 timers["mixer_on_until"] = max(timers["mixer_on_until"], now + mixer_duration)
                 timers["mixer_cooldown_until"] = max(timers["mixer_cooldown_until"], now + mixer_duration + mixer_interval)
 
             # PRIORITY 2 — Soil humidity control
             if soil_status == "WET":
-                fan = True
                 spray = False
                 if control.chk_mixer_var.get():
                     mixer = request_mixer_start("soil_wet")
@@ -1020,24 +1046,18 @@ def F_MakeScreen_Demo():
             # PRIORITY 3 — Air humidity + temp (only when soil OK)
             soil_ok = (soil_status == "OK")
             if soil_ok:
-                if air_too_hot and control.chk_fan_var.get():
-                    fan = True
                 if air_hum_status == "HIGH" and control.chk_fan_var.get():
-                    fan = True
                     spray = False
                 if air_hum_status == "DRY" and control.chk_spray_var.get():
                     spray = request_spray_start("air_dry")
 
-            # PRIORITY 4 — Air quality / CO2
-            if (air_quality_bad or co2_high) and control.chk_fan_var.get():
-                fan = True
-
-            # 最終的なFan判定（OR）
+            # 最終的なFan判定（OR）。air_too_hot / air_hum HIGH は soil_ok の
+            # ときだけトリガーにする（土壌DRY中にファンで追加乾燥させないため）
+            air_fan_trigger = soil_ok and (air_too_hot or air_hum_status == "HIGH")
             fan_required = (
                 soil_too_hot or
                 soil_status == "WET" or
-                air_too_hot or
-                air_hum_status == "HIGH" or
+                air_fan_trigger or
                 air_quality_bad or
                 co2_high
             )

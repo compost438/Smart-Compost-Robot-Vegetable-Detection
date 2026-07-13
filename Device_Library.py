@@ -12,6 +12,7 @@ I2C / UART センサをまとめて扱うためのデバイスライブラリ
 """
 
 import time
+import threading
 import smbus2
 import serial
 
@@ -28,6 +29,10 @@ class DeviceClass:
 
         # I2Cバスの初期化
         self.i2c = smbus2.SMBus(i2c_bus_number)
+
+        # I2C/UARTはセンサーループ(メインスレッド)とカメラ撮影スレッドの
+        # 両方からアクセスされうるため、バス操作全体を排他制御する
+        self._bus_lock = threading.RLock()
 
         # I2Cアドレス
         self.sht35_addr = 0x44
@@ -72,11 +77,12 @@ class DeviceClass:
           status: 0=OK, 1=短いデータ, 2=例外
         """
         try:
-            # 高精度計測コマンド（0x2400）
-            self.i2c.write_i2c_block_data(self.sht35_addr, 0x24, [0x00])
-            time.sleep(0.015)
+            with self._bus_lock:
+                # 高精度計測コマンド（0x2400）
+                self.i2c.write_i2c_block_data(self.sht35_addr, 0x24, [0x00])
+                time.sleep(0.015)
 
-            data = self.i2c.read_i2c_block_data(self.sht35_addr, 0x00, 6)
+                data = self.i2c.read_i2c_block_data(self.sht35_addr, 0x00, 6)
             if len(data) != 6:
                 return (1, 0.0, 0.0)
 
@@ -126,15 +132,16 @@ class DeviceClass:
                 | 0x0003
             )
 
-            self.i2c.write_i2c_block_data(
-                self.ads1115_addr,
-                CONFIG_REG,
-                [(config >> 8) & 0xFF, config & 0xFF],
-            )
+            with self._bus_lock:
+                self.i2c.write_i2c_block_data(
+                    self.ads1115_addr,
+                    CONFIG_REG,
+                    [(config >> 8) & 0xFF, config & 0xFF],
+                )
 
-            time.sleep(0.003)
+                time.sleep(0.003)
 
-            data = self.i2c.read_i2c_block_data(self.ads1115_addr, CONV_REG, 2)
+                data = self.i2c.read_i2c_block_data(self.ads1115_addr, CONV_REG, 2)
             raw = (data[0] << 8) | data[1]
             if raw > 32767:
                 raw -= 65536
@@ -153,17 +160,18 @@ class DeviceClass:
         BME280 の値を読み取る（初回のみ初期化）
         return: (temp, hum, pres)
         """
-        if not self._bme280_initialized:
-            try:
-                self.setup_bme280()
-                self.get_calib_param()
-                self._bme280_initialized = True
-                time.sleep(0.01)
-            except Exception as e:
-                self._debug(f"BME280 init error: {e}")
-                return 0.0, 0.0, 0.0
+        with self._bus_lock:
+            if not self._bme280_initialized:
+                try:
+                    self.setup_bme280()
+                    self.get_calib_param()
+                    self._bme280_initialized = True
+                    time.sleep(0.01)
+                except Exception as e:
+                    self._debug(f"BME280 init error: {e}")
+                    return 0.0, 0.0, 0.0
 
-        temp, hum, pres = self.readData()
+            temp, hum, pres = self.readData()
         return round(temp, 2), round(hum, 2), round(pres, 2)
 
     def writeReg(self, reg_address, data):
@@ -310,23 +318,24 @@ class DeviceClass:
         TSL2561 を読み取る（初回のみ初期化）
         return: (lux, visible_raw, ir_raw)
         """
-        if not self._tsl2561_initialized:
-            try:
-                self.tsl2561_init()
-                self._tsl2561_initialized = True
-                time.sleep(0.05)
-            except Exception as e:
-                self._debug(f"TSL2561 init error: {e}")
-                return 0.0, 0, 0
+        with self._bus_lock:
+            if not self._tsl2561_initialized:
+                try:
+                    self.tsl2561_init()
+                    self._tsl2561_initialized = True
+                    time.sleep(0.05)
+                except Exception as e:
+                    self._debug(f"TSL2561 init error: {e}")
+                    return 0.0, 0, 0
 
-        try:
-            visible = self.getVisibleLightRawData()
-            infrared = self.getInfraredRawData()
-            lux = self.getLux(visible, infrared)
-            return round(lux, 2), visible, infrared
-        except Exception as e:
-            self._debug(f"TSL2561 read error: {e}")
-            return 0.0, 0, 0
+            try:
+                visible = self.getVisibleLightRawData()
+                infrared = self.getInfraredRawData()
+                lux = self.getLux(visible, infrared)
+                return round(lux, 2), visible, infrared
+            except Exception as e:
+                self._debug(f"TSL2561 read error: {e}")
+                return 0.0, 0, 0
 
     def tsl2561_power(self, on: bool = True):
         """TSL2561 電源ON/OFF"""

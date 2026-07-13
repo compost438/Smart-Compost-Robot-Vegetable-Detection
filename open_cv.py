@@ -28,8 +28,10 @@ from LocalLogger import log_ai_result
 
 
 # モデルファイル（それぞれ別の .onnx を指す）
-CN_MODEL_PATH = "/home/d5110/Desktop/Nicholas/AI Model/best_veg.onnx"
-STAGE_MODEL_PATH = "/home/d5110/Desktop/Nicholas/AI Model/best_stage.onnx"
+# デフォルトはプロジェクト内 "AI Model" フォルダ。環境変数で上書き可能。
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CN_MODEL_PATH = os.environ.get("CN_MODEL_PATH", os.path.join(BASE_DIR, "AI Model", "best_veg.onnx"))
+STAGE_MODEL_PATH = os.environ.get("STAGE_MODEL_PATH", os.path.join(BASE_DIR, "AI Model", "best_stage.onnx"))
 
 
 BIN_ID = 2

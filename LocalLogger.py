@@ -8,7 +8,7 @@ LocalLogger.py
 
 import os
 import csv
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 LOG_DIR = "./logs"
@@ -45,7 +45,7 @@ def log_sensor_data(
     co2_ppm: float,
 ) -> None:
     """センサーデータを sensor_data.csv に追記（timestampはUTC）"""
-    ts = datetime.utcnow().isoformat()
+    ts = datetime.now(timezone.utc).isoformat()
     fieldnames = [
         "timestamp", "bin_id", "air_temp", "air_hum", "air_pres",
         "soil_temp", "soil_hum", "lux", "air_ratio", "co2_ppm",
@@ -78,7 +78,7 @@ def log_ai_result(
     ※ 既存の ai_results.csv が古い5列ヘッダーで残っていると新しい列が
        書かれない。初回はファイルを削除するか、列ありで作り直すこと。
     """
-    ts = datetime.utcnow().isoformat()
+    ts = datetime.now(timezone.utc).isoformat()
     fieldnames = [
         "timestamp", "bin_id", "sensor_data_id",
         "stage", "confidence", "cn_ratio", "browns_grams",
