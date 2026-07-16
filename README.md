@@ -32,7 +32,7 @@ An AI-assisted compost monitoring and control system running on a Raspberry Pi. 
 | `LocalLogger.py` | Local CSV/file logging of sensor readings. |
 | `Database_Neon.py` | Neon PostgreSQL upload. |
 | `calibrate_co2.py` | One-time MH-Z19C fresh-air zero calibration utility. |
-| `Compost_Model.ipynb` | Colab notebook for dataset preparation, training, and evaluation. |
+| `Vegetable_Detection_Model.ipynb` | Colab notebook for dataset preparation, training, and evaluation. |
 
 <!-- Adjust the table to match the exact filenames in your repo. -->
 
