@@ -10,11 +10,12 @@ import pigpio
 
 from Device_Library import DeviceClass
 from Database_Neon import DatabaseTool
-from open_cv import OpenCVCamera
+from open_cv import OpenCVCamera, AI_HISTORY_DIRNAME
 from LocalLogger import log_sensor_data
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 IMAGE_SIZE = 360  # smaller so the whole page fits a 1080p screen
+PHOTOS_DIR = "./Photos"  # OpenCVCamera(save_dir=...) と一致させること
 
 # ---- Theme palette (dark + compost green) ----
 BG = "#0e1512"            # app background
@@ -129,6 +130,10 @@ def F_MakeScreen_Demo():
     gpio_buttons = {}      # GPIOボタン参照
     capture_led_on = False # 撮影時にLEDを自動点灯したか
     LIGHT_MIN_LUX = 50.0   # 暗い場合のみ撮影前LED点灯（Enable Light がONのとき）
+
+    # 写真履歴ブラウザ（◀/▶で過去の撮影を閲覧）
+    history_files = []     # 撮影写真パス（古い→新しい）
+    history_index = -1     # 表示中の写真インデックス
 
     # DB送信用：直近N回の平均を送る
     DB_AVG_WINDOW = 20
@@ -454,6 +459,19 @@ def F_MakeScreen_Demo():
                                                text_color=TEXT_MUTED, font=("Arial", 11))
     control.lbl_photo_timestamp.pack(anchor="w", padx=16, pady=(0, 6))
 
+    # ---- 写真履歴ナビゲーション（◀ 3/17 ▶）----
+    nav_bar = ctk.CTkFrame(live_card, fg_color="transparent")
+    nav_bar.pack(fill="x", padx=16, pady=(0, 8))
+    ctk.CTkButton(nav_bar, text="◀ Prev", width=92, height=30,
+                  fg_color=BTN_OFF, hover_color="#2b332e", text_color=TEXT,
+                  corner_radius=8, command=lambda: nav_photo(-1)).pack(side="left")
+    control.lbl_photo_nav = ctk.CTkLabel(nav_bar, text="— / —",
+                                         text_color=TEXT_MUTED, font=("Arial", 11))
+    control.lbl_photo_nav.pack(side="left", expand=True)
+    ctk.CTkButton(nav_bar, text="Next ▶", width=92, height=30,
+                  fg_color=BTN_OFF, hover_color="#2b332e", text_color=TEXT,
+                  corner_radius=8, command=lambda: nav_photo(1)).pack(side="right")
+
     lvbar = ctk.CTkFrame(live_card, fg_color="transparent")
     lvbar.pack(fill="x", padx=16, pady=(0, 14))
     control.live_var = ctk.BooleanVar(value=False)
@@ -490,10 +508,18 @@ def F_MakeScreen_Demo():
     ctk.CTkLabel(control.weight_container, text="(capture to estimate)",
                  text_color=TEXT_MUTED, font=("Arial", 12)).pack(anchor="w")
     total_row = ctk.CTkFrame(weight_card, fg_color=TILE_BG, corner_radius=12)
-    total_row.pack(fill="x", padx=14, pady=(0, 14))
+    total_row.pack(fill="x", padx=14, pady=(0, 8))
     ctk.CTkLabel(total_row, text="TOTAL", text_color=TEXT, font=("Arial", 14, "bold")).pack(side="left", padx=16, pady=12)
     control.lbl_weight_total = ctk.CTkLabel(total_row, text="-- g", text_color=ACCENT, font=("Arial", 18, "bold"))
     control.lbl_weight_total.pack(side="right", padx=16, pady=12)
+
+    # レベル選択後にこのボタンで確定 → 写真のメタデータ(JSON)へ保存される。
+    # 過去写真の閲覧中は無効（保存は最新の撮影に対してのみ可能）。
+    control.btn_save_weight = ctk.CTkButton(
+        weight_card, text="Save Estimate", height=36, corner_radius=10,
+        fg_color=BTN_OFF, hover_color=ACCENT_HOVER, text_color=TEXT_MUTED,
+        state="disabled", command=lambda: save_weight_estimate())
+    control.btn_save_weight.pack(fill="x", padx=14, pady=(0, 14))
 
     # ---- Carbon / Nitrogen ----
     cn_card = make_card(right)
@@ -685,6 +711,26 @@ def F_MakeScreen_Demo():
             pass
         control.after(1000, tick_clock)
 
+    def display_image_file(path):
+        """1枚をキャンバスに表示（伸縮せず黒背景でパディング）"""
+        try:
+            if os.path.exists(path):
+                img = Image.open(path)
+                img = ImageOps.pad(img, (IMAGE_SIZE, IMAGE_SIZE), color=(0, 0, 0))
+            else:
+                img = Image.new("RGB", (IMAGE_SIZE, IMAGE_SIZE), color=(20, 20, 20))
+                draw = ImageDraw.Draw(img)
+                draw.text((IMAGE_SIZE // 2 - 80, IMAGE_SIZE // 2), "No Image Found",
+                          fill=(200, 200, 200))
+            control.photo_img = ImageTk.PhotoImage(img)
+            control.canvas1.delete("all")
+            control.canvas1.create_image(0, 0, image=control.photo_img, anchor=ctk.NW)
+            return True
+        except Exception as e:
+            print(f"Image repaint error: {e}")
+            control.lbl_photo_timestamp.configure(text="Image load error", text_color="red")
+            return False
+
     def F_update_image(latest_path):
         """
         画像表示更新：
@@ -704,17 +750,8 @@ def F_MakeScreen_Demo():
             ai_path = os.path.join(os.path.dirname(latest_path), "latest_ai.jpg")
             image_to_show = ai_path if os.path.exists(ai_path) else latest_path
 
-            if os.path.exists(image_to_show):
-                img = Image.open(image_to_show)
-                img = ImageOps.pad(img, (IMAGE_SIZE, IMAGE_SIZE), color=(0, 0, 0))
-            else:
-                img = Image.new("RGB", (IMAGE_SIZE, IMAGE_SIZE), color=(20, 20, 20))
-                draw = ImageDraw.Draw(img)
-                draw.text((IMAGE_SIZE // 2 - 80, IMAGE_SIZE // 2), "No Image Found", fill=(200, 200, 200))
-
-            control.photo_img = ImageTk.PhotoImage(img)
-            control.canvas1.delete("all")
-            control.canvas1.create_image(0, 0, image=control.photo_img, anchor=ctk.NW)
+            if not display_image_file(image_to_show):
+                return
 
             try:
                 ts = time.ctime(os.path.getmtime(image_to_show))
@@ -726,6 +763,138 @@ def F_MakeScreen_Demo():
         except Exception as e:
             print(f"Image repaint error: {e}")
             control.lbl_photo_timestamp.configure(text="Image load error", text_color="red")
+
+    # ============================================================
+    # PHOTO HISTORY BROWSER（◀/▶で過去の撮影と保存済み推定重量を閲覧）
+    # ============================================================
+    def list_history_photos():
+        """Photos/ 内の撮影写真を古い順に返す（frame-YYYY-... は辞書順=時系列）"""
+        try:
+            files = [f for f in os.listdir(PHOTOS_DIR)
+                     if f.startswith("frame-") and f.endswith(".jpg")]
+            files.sort()
+            return [os.path.join(PHOTOS_DIR, f) for f in files]
+        except Exception:
+            return []
+
+    def load_sidecar(raw_path):
+        """写真に対応する保存メタデータ(JSON)を読む。無ければ None"""
+        name = os.path.splitext(os.path.basename(raw_path))[0]
+        p = os.path.join(PHOTOS_DIR, AI_HISTORY_DIRNAME, name + ".json")
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return None
+
+    def update_nav_label():
+        total = len(history_files)
+        if total == 0 or history_index < 0:
+            control.lbl_photo_nav.configure(text="— / —")
+        else:
+            control.lbl_photo_nav.configure(text=f"{history_index + 1} / {total}")
+
+    def refresh_history_list(jump_to_newest=False):
+        nonlocal history_files, history_index
+        history_files = list_history_photos()
+        if jump_to_newest or history_index >= len(history_files):
+            history_index = len(history_files) - 1
+        update_nav_label()
+
+    def set_save_enabled(enabled):
+        control.btn_save_weight.configure(
+            state="normal" if enabled else "disabled",
+            fg_color=ACCENT if enabled else BTN_OFF,
+            text_color="#0b3d1a" if enabled else TEXT_MUTED)
+
+    def build_level_labels(levels):
+        """過去写真用: 保存済みレベルを読み取り専用で表示"""
+        for w in control.levels_container.winfo_children():
+            w.destroy()
+        control.level_menus = {}
+        if not levels:
+            ctk.CTkLabel(control.levels_container, text="(no saved data)",
+                         text_color=TEXT_MUTED, font=("Arial", 12)).pack(anchor="w")
+            return
+        for name, key in levels.items():
+            rowf = ctk.CTkFrame(control.levels_container, fg_color="transparent")
+            rowf.pack(fill="x", pady=2)
+            ctk.CTkLabel(rowf, text=name, text_color=TEXT_MUTED, font=("Arial", 12),
+                         width=110, anchor="w").pack(side="left", padx=(0, 8))
+            ctk.CTkLabel(rowf, text=_KEY_TO_LABEL.get(key, key), text_color=TEXT,
+                         font=("Arial", 12, "bold")).pack(side="left")
+
+    def show_archive_results(meta):
+        """サイドカーJSONの保存値で右カラム（重量/C/N/ステージ/レベル）を更新"""
+        if meta and (meta.get("cn_ratio") is not None or meta.get("per_class_mass")):
+            update_cn_label({
+                "cn_ratio": meta.get("cn_ratio"),
+                "browns_grams": meta.get("browns_grams"),
+                "per_class_mass": meta.get("per_class_mass") or {},
+                "total_mass": meta.get("total_mass") or 0.0,
+            })
+            conf = meta.get("stage_confidence") or 0.0
+            control.lbl_stage.configure(text=f"{meta.get('stage', 'unknown')} ({conf:.2f})")
+            build_level_labels(meta.get("portion_levels") or {})
+        else:
+            update_cn_label(None, empty_text="(no saved data for this photo)",
+                            sub_text="no data for this photo")
+            control.lbl_stage.configure(text="—")
+            build_level_labels(None)
+
+    def show_history_photo(idx):
+        nonlocal history_index
+        if not history_files:
+            return
+        idx = max(0, min(idx, len(history_files) - 1))
+        history_index = idx
+
+        # ライブプレビューはキャンバスを上書きするため閲覧中はOFF
+        if control.live_var.get():
+            control.live_var.set(False)
+            update_rec_indicator()
+
+        raw_path = history_files[idx]
+        name = os.path.splitext(os.path.basename(raw_path))[0]
+        hist_ai = os.path.join(PHOTOS_DIR, AI_HISTORY_DIRNAME, name + ".jpg")
+        display_image_file(hist_ai if os.path.exists(hist_ai) else raw_path)
+        try:
+            ts = time.ctime(os.path.getmtime(raw_path))
+        except Exception:
+            ts = "Unknown"
+        control.lbl_photo_timestamp.configure(text=f"Captured at: {ts}", text_color=TEXT_MUTED)
+        update_nav_label()
+
+        # このセッションの最新撮影ならレベル編集+保存可、それ以外は保存値の表示のみ
+        is_current = (camera is not None and
+                      getattr(camera, "last_capture_name", None) == name)
+        if is_current:
+            refresh_result_labels()
+            set_save_enabled(True)
+        else:
+            show_archive_results(load_sidecar(raw_path))
+            set_save_enabled(False)
+
+    def nav_photo(step):
+        if not history_files:
+            refresh_history_list(jump_to_newest=True)
+        if not history_files:
+            return
+        if history_index < 0:
+            show_history_photo(len(history_files) - 1)
+        else:
+            show_history_photo(history_index + step)
+
+    def save_weight_estimate():
+        """Save Estimate ボタン: 現在のレベル選択・推定重量を写真のJSONへ保存"""
+        if camera is None or not getattr(camera, "last_capture_name", None):
+            return
+        try:
+            if camera.save_current_result():
+                control.btn_save_weight.configure(text="Saved ✓")
+                control.after(1500, lambda: control.btn_save_weight.configure(text="Save Estimate"))
+        except Exception as e:
+            print(f"[SAVE] estimate save error: {e}")
 
     # ============================================================
     # 設定値の即時反映（FocusOut / Enter）
@@ -1177,7 +1346,7 @@ def F_MakeScreen_Demo():
             print(f"[LIVE] loop error: {e}")
         control.after(int(1000 / LIVE_FPS), live_view_loop)
 
-    def update_cn_label(cn):
+    def update_cn_label(cn, empty_text="(capture to estimate)", sub_text="no veg detected"):
         for w in control.weight_container.winfo_children():
             w.destroy()
         if cn and cn.get("cn_ratio") is not None:
@@ -1202,8 +1371,8 @@ def F_MakeScreen_Demo():
                 control.lbl_weight_total.configure(text="-- g", text_color=TEXT_MUTED)
         else:
             control.lbl_cn.configure(text="\u2014", text_color=TEXT_MUTED)
-            control.lbl_cn_sub.configure(text="no veg detected", text_color=TEXT_MUTED)
-            ctk.CTkLabel(control.weight_container, text="(capture to estimate)",
+            control.lbl_cn_sub.configure(text=sub_text, text_color=TEXT_MUTED)
+            ctk.CTkLabel(control.weight_container, text=empty_text,
                          text_color=TEXT_MUTED, font=("Arial", 12)).pack(anchor="w")
             control.lbl_weight_total.configure(text="-- g", text_color=TEXT_MUTED)
 
@@ -1261,7 +1430,19 @@ def F_MakeScreen_Demo():
 
     def on_new_photo_cb(path):
         """カメラスレッドから呼ばれる。GUI更新はメインスレッドへ委譲（Tkinter安全）"""
-        control.after(0, lambda: (F_update_image(path), refresh_result_labels()))
+        def _apply():
+            refresh_history_list(jump_to_newest=True)
+            if camera is not None and getattr(camera, "last_capture_name", None):
+                # このセッションで撮影した写真: レベル編集+Save有効
+                F_update_image(path)
+                refresh_result_labels()
+                set_save_enabled(True)
+            elif history_files:
+                # 起動時コールバック等（過去の写真）: 保存済みデータを表示
+                show_history_photo(len(history_files) - 1)
+            else:
+                F_update_image(path)
+        control.after(0, _apply)
 
     def manual_capture():
         """Capture Now ボタン：今のフレームで撮影 → 2モデル推論 → 結果表示"""
@@ -1269,7 +1450,9 @@ def F_MakeScreen_Demo():
             return
         control.lbl_db_status.configure(text="Capturing...", text_color="#b8860b")
         # プレビューを止め、枠付き結果が live ループで上書きされないようにする
+        # （setはチェックボックスのcommandを呼ばないためRECも明示的に更新）
         control.live_var.set(False)
+        update_rec_indicator()
         camera.capture_now()
 
     # ============================================================
@@ -1326,10 +1509,10 @@ def F_MakeScreen_Demo():
     except Exception as e:
         print(f"Camera failed to start: {e}")
 
-    # 起動時に最新画像があれば表示
-    latest_ai = "./Photos/Current_Image/latest_ai.jpg"
-    if os.path.exists(latest_ai):
-        F_update_image(latest_ai)
+    # 起動時: 撮影履歴があれば最新を表示（保存済みの推定重量も読み込む）
+    refresh_history_list(jump_to_newest=True)
+    if history_files:
+        show_history_photo(len(history_files) - 1)
     else:
         control.canvas1.create_text(
             IMAGE_SIZE // 2,
