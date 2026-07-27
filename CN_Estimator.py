@@ -26,8 +26,8 @@ CLASS_NAMES = ["carrot_peels", "mixed_veg", "onion"]
 
 # 各クラスの C/N 比（文献からの推定値。実測ではない）
 CN_RATIO = {
-    "carrot_peels": 27.0,
-    "mixed_veg": 15.0,
+    "carrot_peels": 30.0,
+    "mixed_veg": 18.0,
     "onion": 15.0,
 }
 
